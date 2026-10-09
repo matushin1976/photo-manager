@@ -7,6 +7,13 @@ section{background:#fff;border-radius:14px;padding:18px;margin:14px 0;box-shadow
 label{display:block;font-weight:600;margin:14px 0 5px}input,select,button{box-sizing:border-box;width:100%;font:inherit;padding:11px;border:1px solid #aebac3;border-radius:8px}
 button{background:#126958;color:white;font-weight:700;border:0;margin-top:16px}button:disabled{opacity:.5}
 small,.hint{color:#52636b}progress{width:100%;margin-top:15px}#status{white-space:pre-wrap}li{margin:9px 0;overflow-wrap:anywhere}
+
+#catalog button{width:auto;padding:9px 12px;margin:4px 4px 4px 0}
+#catalog .wide{width:100%}#catalog select,#catalog textarea{width:100%}
+#catalog .entry{border:1px solid #d8e1e5;border-radius:12px;padding:12px;margin:12px 0}
+#catalog .entry img{width:100%;max-height:260px;object-fit:contain;background:#e7edef;border-radius:6px}
+#catalog .entry label{margin-top:8px}#catalog textarea{min-height:60px}
+#catalog .muted{color:#52636b;font-size:.88rem;overflow-wrap:anywhere}
 </style></head><body><main>
 <h1>現場写真アップロード</h1>
 <p class="hint">仕事用の写真を縮小して保管するための送信専用ページです。<strong>写真の閲覧機能はありません。</strong> 元の写真は端末に残り、縮小した画像だけを送信します。</p>
@@ -23,8 +30,20 @@ small,.hint{color:#52636b}progress{width:100%;margin-top:15px}#status{white-spac
 <p id="status" role="status"></p><ol id="results"></ol>
 </section>
 <small>撮影日時・カメラ情報・GPSは、写真に記録されている場合だけ読み取ります。画像自体は非公開で保管されます。</small>
+
+<section id="catalog">
+<h2>写真一覧・AI分類・写真台帳</h2>
+<p class="hint">保存した写真を確認し、建物・階・撮影箇所を修正できます。AIの判定は仮分類なので確認してください。</p>
+<button id="loadCatalog" class="wide" type="button">保存済み写真を読み込む</button>
+<label for="projectFilter">案件を選択</label><select id="projectFilter"><option value="">すべての案件</option></select>
+<button id="classify" type="button">AIで未分類写真を判定</button>
+<button id="pdfExport" type="button">写真台帳PDFを保存</button>
+<p id="catalogStatus" role="status" class="hint"></p>
+<div id="catalogItems"></div>
+</section>
 </main>
 <script src="https://cdn.jsdelivr.net/npm/exifr@7.1.3/dist/full.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>
 <script>
 "use strict";
 const ENDPOINT="https://jzwghrlevmikuhvjyjdr.supabase.co/functions/v1/photo-drop";
@@ -101,5 +120,177 @@ $("upload").onclick=async()=>{
   }
   $("status").textContent=ok+" / "+files.length+"枚を保存しました";
  }finally{$("upload").disabled=false}
+};
+
+const CATALOG_ENDPOINT="https://jzwghrlevmikuhvjyjdr.supabase.co/functions/v1/photo-catalog";
+const CATEGORIES=[
+ ["建物外観","the exterior of a building"],["屋根","a roof"],["外壁","an exterior wall"],
+ ["基礎","the concrete foundation of a building"],["室内","the interior of a room"],
+ ["階段","a staircase"],["台所","a kitchen"],["浴室・トイレ","a bathroom"],
+ ["玄関","a building entrance"],["設備","electrical and plumbing equipment"],
+ ["窓","a window"],["建具","a door"],["床","a floor surface"],
+ ["工事状況","a building construction site"],["境界標","a property boundary marker"],
+ ["敷地","a vacant land lot"],["図面","a technical drawing"]
+];
+let catalogPhotos=[],clipModel=null,catalogBusy=false;
+const statusCatalog=t=>$("catalogStatus").textContent=t;
+async function catalogRequest(payload){
+ const pass=$("pass").value;
+ if(!pass)throw Error("上の合言葉を入力してください");
+ const r=await fetch(CATALOG_ENDPOINT,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({passphrase:pass,...payload}),cache:"no-store",credentials:"omit"});
+ const data=await r.json().catch(()=>({}));
+ if(!r.ok)throw Error(data.error||"サーバーエラー "+r.status);
+ return data;
+}
+function element(tag,txt,cls){
+ const x=document.createElement(tag);
+ if(txt!==undefined&&txt!==null)x.textContent=String(txt);
+ if(cls)x.className=cls;
+ return x;
+}
+function choices(values,current){
+ const sel=element("select");
+ for(const v of values){const o=element("option",v||"未分類");o.value=v;sel.append(o)}
+ sel.value=current||"";
+ return sel;
+}
+function shownPhotos(){
+ const p=$("projectFilter").value;
+ return catalogPhotos.filter(x=>!p||x.project_name===p).sort((a,b)=>String(a.taken_at||a.created_at).localeCompare(String(b.taken_at||b.created_at)));
+}
+function refreshFilter(){
+ const old=$("projectFilter").value,sel=$("projectFilter");
+ sel.replaceChildren();const o=element("option","すべての案件");o.value="";sel.append(o);
+ for(const p of [...new Set(catalogPhotos.map(x=>x.project_name||"案件未設定"))].sort()){const x=element("option",p);x.value=p;sel.append(x)}
+ if([...sel.options].some(x=>x.value===old))sel.value=old;
+}
+function labelControl(container,title,control){
+ const l=element("label",title);container.append(l,control);
+}
+function renderCatalog(){
+ const root=$("catalogItems");root.replaceChildren();
+ const rows=shownPhotos();statusCatalog("表示 "+rows.length+"枚／保存済み "+catalogPhotos.length+"枚");
+ for(const p of rows){
+  const card=element("div",null,"entry");
+  const im=element("img");im.loading="lazy";im.alt=p.original_filename||"現場写真";if(p.image_url)im.src=p.image_url;card.append(im);
+  card.append(element("div",p.original_filename||"写真","muted"));
+  card.append(element("div","撮影 "+formatTaken(p.taken_at)+"／"+(p.camera_model||"機種不明"),"muted"));
+  if(p.latitude!=null&&p.longitude!=null)card.append(element("div","GPS "+Number(p.latitude).toFixed(6)+", "+Number(p.longitude).toFixed(6),"muted"));
+  const building=choices(["","主たる建物","附属建物"],p.building_label);
+  const floor=choices(["","1階","2階","3階","屋外"],p.floor_label);
+  const category=choices(["",...CATEGORIES.map(x=>x[0])],(p.ai_categories||[])[0]);
+  const desc=element("textarea");desc.value=p.ai_description||"";desc.placeholder="写真の説明（任意）";
+  const notes=element("textarea");notes.value=p.notes||"";notes.placeholder="現場メモ（任意）";
+  labelControl(card,"建物",building);labelControl(card,"階",floor);labelControl(card,"撮影箇所（AI仮分類・手動修正可）",category);
+  labelControl(card,"写真の説明",desc);labelControl(card,"備考",notes);
+  const save=element("button","この写真の分類を保存");
+  save.onclick=async()=>{
+   save.disabled=true;
+   try{
+    await catalogRequest({action:"update",id:p.id,building_label:building.value,floor_label:floor.value,category:category.value,description:desc.value,notes:notes.value});
+    Object.assign(p,{building_label:building.value||null,floor_label:floor.value||null,ai_categories:category.value?[category.value]:[],ai_description:desc.value,notes:notes.value});
+    statusCatalog("保存しました："+(p.original_filename||"写真"));
+   }catch(e){statusCatalog("保存失敗："+e.message)}finally{save.disabled=false}
+  };
+  card.append(save);root.append(card);
+ }
+}
+function formatTaken(d){if(!d)return "不明";try{return new Date(d).toLocaleString("ja-JP",{timeZone:"Asia/Tokyo"})}catch{return String(d)}}
+$("projectFilter").onchange=renderCatalog;
+$("loadCatalog").onclick=async()=>{
+ $("loadCatalog").disabled=true;statusCatalog("写真を読み込み中…");
+ try{const data=await catalogRequest({action:"list"});catalogPhotos=data.photos||[];refreshFilter();renderCatalog()}
+ catch(e){statusCatalog("読み込み失敗："+e.message)}finally{$("loadCatalog").disabled=false}
+};
+$("classify").onclick=async()=>{
+ if(catalogBusy)return;
+ const rows=shownPhotos().filter(p=>!(p.ai_categories||[]).length&&p.image_url);
+ if(!rows.length){statusCatalog("未分類の写真がありません。先に一覧を読み込んでください");return}
+ catalogBusy=true;$("classify").disabled=true;
+ try{
+  statusCatalog("AIモデルを準備中。初回は大きなデータのダウンロードが必要です…");
+  if(!clipModel){
+   const {pipeline}=await import("https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2");
+   clipModel=await pipeline("zero-shot-image-classification","Xenova/clip-vit-base-patch32",{quantized:true});
+  }
+  let done=0;
+  for(const p of rows){
+   statusCatalog("AI分類中 "+(done+1)+"/"+rows.length+"："+(p.original_filename||"写真"));
+   try{
+    const labels=CATEGORIES.map(x=>x[1]);
+    const result=await clipModel(p.image_url,labels,{hypothesis_template:"This is a photograph of {}."});
+    const top=Array.isArray(result)?result[0]:null;
+    if(!top)throw Error("分類結果がありません");
+    const index=labels.indexOf(top.label),category=index>=0?CATEGORIES[index][0]:"";
+    if(!category)throw Error("分類できませんでした");
+    const description="AI仮判定："+category+"（参考スコア "+Math.round((top.score||0)*100)+"%）。要確認";
+    await catalogRequest({action:"update",id:p.id,building_label:p.building_label||"",floor_label:p.floor_label||"",category,description,notes:p.notes||""});
+    p.ai_categories=[category];p.ai_description=description;
+   }catch(e){console.warn("AI classification",e);statusCatalog("分類失敗："+e.message)}
+   done++;
+  }
+  renderCatalog();statusCatalog("AI仮分類を "+done+"枚処理しました。結果を確認してください");
+ }catch(e){statusCatalog("AIを起動できません："+e.message+"。手動分類は利用できます")}
+ finally{catalogBusy=false;$("classify").disabled=false}
+};
+async function loadPhoto(url){
+ return await new Promise((resolve,reject)=>{
+  const im=new Image();im.crossOrigin="anonymous";im.onload=()=>resolve(im);im.onerror=()=>reject(Error("画像を読み込めません"));im.src=url;
+ });
+}
+function wrapped(ctx,text,x,y,maxWidth,lineHeight,maxLines=3){
+ let line="",count=0;
+ for(const c of String(text||"")){
+  if(ctx.measureText(line+c).width>maxWidth&&line){ctx.fillText(line,x,y);y+=lineHeight;line="";count++;if(count>=maxLines)return y}
+  line+=c;
+ }
+ if(line)ctx.fillText(line,x,y);
+ return y+lineHeight;
+}
+$("pdfExport").onclick=async()=>{
+ const rows=shownPhotos();
+ if(!rows.length){statusCatalog("先に写真一覧を読み込んでください");return}
+ if(!window.jspdf){statusCatalog("PDFライブラリを読み込めません");return}
+ $("pdfExport").disabled=true;
+ try{
+  const {jsPDF}=window.jspdf;
+  const pdf=new jsPDF({orientation:"portrait",unit:"mm",format:"a4",compress:true});
+  const c=document.createElement("canvas");c.width=1240;c.height=1754;
+  const ctx=c.getContext("2d");
+  const pages=Math.ceil(rows.length/2);
+  for(let page=0;page<pages;page++){
+   ctx.fillStyle="#fff";ctx.fillRect(0,0,c.width,c.height);
+   ctx.fillStyle="#162631";ctx.font="bold 45px sans-serif";ctx.fillText("現場写真台帳",65,86);
+   ctx.font="26px sans-serif";ctx.fillText("案件："+($("projectFilter").value||"全案件"),65,135);
+   ctx.font="20px sans-serif";ctx.fillText((page+1)+" / "+pages+" ページ",1000,132);
+   for(let j=0;j<2;j++){
+    const p=rows[page*2+j];if(!p)continue;
+    const y=190+j*765;
+    ctx.strokeStyle="#9eabb4";ctx.lineWidth=2;ctx.strokeRect(55,y,1130,720);
+    ctx.fillStyle="#182c35";ctx.font="bold 27px sans-serif";
+    ctx.fillText("写真 "+(page*2+j+1)+"　"+(p.building_label||"建物未分類")+"　"+(p.floor_label||""),78,y+43);
+    ctx.fillStyle="#edf1f3";ctx.fillRect(75,y+70,700,520);
+    if(p.image_url){
+     try{
+      const im=await loadPhoto(p.image_url);
+      const ratio=Math.min(700/im.width,520/im.height);
+      const w=im.width*ratio,h=im.height*ratio;
+      ctx.drawImage(im,75+(700-w)/2,y+70+(520-h)/2,w,h);
+     }catch(e){ctx.fillStyle="#444";ctx.fillText("画像を読み込めません",100,y+310)}
+    }
+    ctx.fillStyle="#17252f";ctx.font="23px sans-serif";
+    let yy=y+115;
+    for(const t of ["撮影箇所："+((p.ai_categories||[])[0]||"未分類"),"撮影日時："+formatTaken(p.taken_at),"カメラ："+(p.camera_model||"不明"),"GPS："+(p.latitude!=null&&p.longitude!=null?Number(p.latitude).toFixed(6)+", "+Number(p.longitude).toFixed(6):"記録なし"),"ファイル："+(p.original_filename||""),"説明："+(p.ai_description||""),"備考："+(p.notes||"")]){
+     yy=wrapped(ctx,t,795,yy,360,34,3)+10;
+    }
+    ctx.font="20px sans-serif";wrapped(ctx,"案件："+(p.project_name||""),78,y+635,1050,28,2);
+   }
+   if(page)pdf.addPage();
+   pdf.addImage(c.toDataURL("image/jpeg",0.85),"JPEG",0,0,210,297);
+   statusCatalog("PDF作成中 "+(page+1)+"/"+pages+"ページ");
+  }
+  pdf.save("現場写真台帳.pdf");statusCatalog("写真台帳PDFを作成しました（"+rows.length+"枚）");
+ }catch(e){statusCatalog("PDF作成失敗："+e.message)}
+ finally{$("pdfExport").disabled=false}
 };
 </script></body></html>

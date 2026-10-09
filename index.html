@@ -126,7 +126,7 @@ const CATALOG_ENDPOINT="https://jzwghrlevmikuhvjyjdr.supabase.co/functions/v1/ph
 const CATEGORIES=[
  ["建物外観","the exterior of a building"],["屋根","a roof"],["外壁","an exterior wall"],
  ["基礎","the concrete foundation of a building"],["室内","the interior of a room"],
- ["階段","a staircase"],["台所","a kitchen"],["浴室・トイレ","a bathroom"],
+ ["階段","a staircase"],["台所","a kitchen"],["トイレ","a toilet and toilet bowl in a restroom"],["浴室","a bathtub or shower in a bathing room"],
  ["玄関","a building entrance"],["設備","electrical and plumbing equipment"],
  ["窓","a window"],["建具","a door"],["床","a floor surface"],
  ["工事状況","a building construction site"],["境界標","a property boundary marker"],
@@ -158,6 +158,27 @@ function shownPhotos(){
  const p=$("projectFilter").value;
  return catalogPhotos.filter(x=>!p||x.project_name===p).sort((a,b)=>String(a.taken_at||a.created_at).localeCompare(String(b.taken_at||b.created_at)));
 }
+// 同じ案件・建物・階・撮影箇所の写真だけ、撮影日時順に連番を付ける。
+function numberedCategories(){
+ const ordered=[...catalogPhotos].sort((a,b)=>{
+  const date=String(a.taken_at||a.created_at||"").localeCompare(String(b.taken_at||b.created_at||""));
+  return date||String(a.id).localeCompare(String(b.id));
+ });
+ const groups=new Map(),result=new Map();
+ for(const p of ordered){
+  const category=(p.ai_categories||[])[0];
+  if(!category)continue;
+  const key=JSON.stringify([p.project_name||"",p.building_label||"",p.floor_label||"",category]);
+  if(!groups.has(key))groups.set(key,[]);
+  groups.get(key).push(p.id);
+ }
+ const circled=n=>n>=1&&n<=20?String.fromCodePoint(0x2460+n-1):"("+n+")";
+ for(const [key,ids] of groups){
+  const category=JSON.parse(key)[3];
+  ids.forEach((id,i)=>result.set(id,category+(ids.length>1?circled(i+1):"")));
+ }
+ return result;
+}
 function refreshFilter(){
  const old=$("projectFilter").value,sel=$("projectFilter");
  sel.replaceChildren();const o=element("option","すべての案件");o.value="";sel.append(o);
@@ -169,7 +190,7 @@ function labelControl(container,title,control){
 }
 function renderCatalog(){
  const root=$("catalogItems");root.replaceChildren();
- const rows=shownPhotos();statusCatalog("表示 "+rows.length+"枚／保存済み "+catalogPhotos.length+"枚");
+ const rows=shownPhotos(),numbered=numberedCategories();statusCatalog("表示 "+rows.length+"枚／保存済み "+catalogPhotos.length+"枚");
  for(const p of rows){
   const card=element("div",null,"entry");
   const im=element("img");im.loading="lazy";im.alt=p.original_filename||"現場写真";if(p.image_url)im.src=p.image_url;card.append(im);
@@ -182,6 +203,7 @@ function renderCatalog(){
   const desc=element("textarea");desc.value=p.ai_description||"";desc.placeholder="写真の説明（任意）";
   const notes=element("textarea");notes.value=p.notes||"";notes.placeholder="現場メモ（任意）";
   labelControl(card,"建物",building);labelControl(card,"階",floor);labelControl(card,"撮影箇所（AI仮分類・手動修正可）",category);
+  if(numbered.has(p.id))card.append(element("div","台帳表示："+numbered.get(p.id),"muted"));
   labelControl(card,"写真の説明",desc);labelControl(card,"備考",notes);
   const save=element("button","この写真の分類を保存");
   save.onclick=async()=>{
@@ -189,7 +211,7 @@ function renderCatalog(){
    try{
     await catalogRequest({action:"update",id:p.id,building_label:building.value,floor_label:floor.value,category:category.value,description:desc.value,notes:notes.value});
     Object.assign(p,{building_label:building.value||null,floor_label:floor.value||null,ai_categories:category.value?[category.value]:[],ai_description:desc.value,notes:notes.value});
-    statusCatalog("保存しました："+(p.original_filename||"写真"));
+    renderCatalog();statusCatalog("保存しました："+(p.original_filename||"写真"));
    }catch(e){statusCatalog("保存失敗："+e.message)}finally{save.disabled=false}
   };
   card.append(save);root.append(card);
@@ -248,7 +270,7 @@ function wrapped(ctx,text,x,y,maxWidth,lineHeight,maxLines=3){
  return y+lineHeight;
 }
 $("pdfExport").onclick=async()=>{
- const rows=shownPhotos();
+ const rows=shownPhotos(),numbered=numberedCategories();
  if(!rows.length){statusCatalog("先に写真一覧を読み込んでください");return}
  if(!window.jspdf){statusCatalog("PDFライブラリを読み込めません");return}
  $("pdfExport").disabled=true;
@@ -280,7 +302,7 @@ $("pdfExport").onclick=async()=>{
     }
     ctx.fillStyle="#17252f";ctx.font="23px sans-serif";
     let yy=y+115;
-    for(const t of ["撮影箇所："+((p.ai_categories||[])[0]||"未分類"),"撮影日時："+formatTaken(p.taken_at),"カメラ："+(p.camera_model||"不明"),"GPS："+(p.latitude!=null&&p.longitude!=null?Number(p.latitude).toFixed(6)+", "+Number(p.longitude).toFixed(6):"記録なし"),"ファイル："+(p.original_filename||""),"説明："+(p.ai_description||""),"備考："+(p.notes||"")]){
+    for(const t of ["撮影箇所："+(numbered.get(p.id)||"未分類"),"撮影日時："+formatTaken(p.taken_at),"カメラ："+(p.camera_model||"不明"),"GPS："+(p.latitude!=null&&p.longitude!=null?Number(p.latitude).toFixed(6)+", "+Number(p.longitude).toFixed(6):"記録なし"),"ファイル："+(p.original_filename||""),"説明："+(p.ai_description||""),"備考："+(p.notes||"")]){
      yy=wrapped(ctx,t,795,yy,360,34,3)+10;
     }
     ctx.font="20px sans-serif";wrapped(ctx,"案件："+(p.project_name||""),78,y+635,1050,28,2);

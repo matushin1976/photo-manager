@@ -82,7 +82,8 @@ $("upload").onclick=async()=>{
    const f=files[i];$("status").textContent=(i+1)+" / "+files.length+"："+f.name+" を処理中";
    try{
     let ex={};try{if(window.exifr)ex=await window.exifr.parse(f,{tiff:true,exif:true,gps:true,ifd0:true,interop:true,ifd1:true,iptc:true,xmp:true,icc:true,jfif:true,mergeOutput:true})||{}}catch(e){console.warn("EXIF",e)}
-    const reduced=await resize(f,Number($("size").value),Number($("quality").value)/100);\n    const blob=await preserveMetadata(reduced,{filename:f.name,exif:ex,original_size:f.size});
+    const reduced=await resize(f,Number($("size").value),Number($("quality").value)/100);
+    const blob=await preserveMetadata(reduced,{filename:f.name,exif:ex,original_size:f.size});
     const meta={project_name:project,building_label:$("building").value||null,floor_label:$("floor").value||null,
      original_filename:f.name,taken_at:dateValue(ex.DateTimeOriginal||ex.CreateDate),
      camera_make:ex.Make||null,camera_model:ex.Model||null,latitude:finite(ex.latitude),longitude:finite(ex.longitude),
